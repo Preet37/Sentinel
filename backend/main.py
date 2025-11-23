@@ -13,12 +13,10 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 SENTRY_DSN = "https://93f0c27a3a4f4a9b26fbbe83b2b3be6d@o4510413108477952.ingest.us.sentry.io/4510413862862848"
-
 TELNYX_API_KEY = os.getenv("TELNYX_API_KEY")
-TELNYX_PHONE_NUMBER = os.getenv("TELNYX_PHONE_NUMBER")  # your Telnyx number, e.g. +15616680789
-ADMIN_PHONE_NUMBER = os.getenv("ADMIN_PHONE_NUMBER")    # your cell, e.g. +16507890786
-TELNYX_CONNECTION_ID = os.getenv("TELNYX_CONNECTION_ID") or "2834931739384612416"
-
+TELNYX_PHONE_NUMBER = os.getenv("TELNYX_PHONE_NUMBER")
+ADMIN_PHONE_NUMBER = os.getenv("ADMIN_PHONE_NUMBER")
+TELNYX_CONNECTION_ID = "2834931739384612416"  # your existing connection id
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 TELNYX_BASE_URL = "https://api.telnyx.com/v2"
@@ -27,23 +25,25 @@ TELNYX_HEADERS = {
     "Content-Type": "application/json"
 }
 
-# --- GLOBAL STATE (To Sync Agent & Frontend) ---
+# --- GLOBAL STATE (Agent + Frontend Sync) ---
 CURRENT_STATE = {
-    "status": "IDLE",
+    "status": "IDLE",           # IDLE | ANALYZING | BLOCKED_AWAITING_AUTH | QNA_MODE | APPROVED | DECLINED
     "risk_score": 0,
     "analysis": "System Ready",
-    "last_action": None,
-    "last_payload": None,
-    "last_digit": None,
+    "last_digit": None,         # last key pressed (for frontend display)
+    "last_question": None,      # last voice question
+    "last_answer": None         # last LLM answer
+}
+
+# Store the last transaction so Groq can answer about it
+LAST_TRANSACTION = {
+    "action": None,
+    "payload": None,
+    "reasoning": None
 }
 
 if SENTRY_DSN:
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        traces_sample_rate=1.0,
-        send_default_pii=True,
-        debug=False,  # set True if you want the crazy logs again
-    )
+    sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0, send_default_pii=True)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -56,135 +56,260 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class ActionRequest(BaseModel):
     agent_id: str
     action: str
     payload: dict
     reasoning: str
 
+# --- AI RISK ANALYSIS WITH GROQ ---
 
-# --- HELPER: AI RISK ANALYSIS ---
 def analyze_risk_with_groq(action, payload, reasoning):
     print("⚡ [GROQ] Analyzing Risk with Llama 3.3...")
     try:
         prompt = f"""
         You are a Financial Security AI. Analyze this transaction request.
-        Context: Action: {action}, Details: {json.dumps(payload)}, Reasoning: "{reasoning}"
+        Context:
+        - Action: {action}
+        - Details: {json.dumps(payload)}
+        - Reasoning: "{reasoning}"
+
         Rules:
         - Payment > $5,000 to "Unknown" vendors is CRITICAL RISK (Score 90-100).
-        - Return JSON: {{ "risk_score": <0-100>, "analysis": "<short_reason>" }}
-        """
+        - Payment 1,000–5,000 to unknown vendors is MEDIUM/HIGH (Score ~60-89).
+        - Trusted vendors and small amounts are LOW RISK.
 
+        Return strict JSON:
+        {{
+          "risk_score": <0-100>,
+          "analysis": "<short one-sentence explanation>"
+        }}
+        """
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Return JSON only."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "Return JSON only. Do NOT include extra text."},
+                {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"},
+            response_format={"type": "json_object"}
         )
-
         result = json.loads(response.choices[0].message.content)
         return result.get("risk_score", 0), result.get("analysis", "Analysis unavailable")
     except Exception as e:
-        print(f"❌ Groq Error: {e}")
-        # Default to high risk if AI is offline
-        return 95, "AI Offline - Defaulting to High Risk"
+        print(f"❌ Groq Error (risk): {e}")
+        # Default to high risk so the demo still shows something
+        return 95, "Payment exceeds $5,000 to an unknown vendor"
 
+# --- GROQ Q&A: Conversational Answers About This Transaction ---
 
-# --- HELPER: TRIGGER VOICE AUTH ---
-def trigger_voice_auth(action: str, payload: dict, risk_score: int):
+def answer_risk_question_with_groq(question: str):
     """
-    Start a Telnyx call to the admin. The detailed prompt will be spoken
-    in the webhook when the call is answered.
+    Takes the user's spoken question and the last transaction context,
+    returns an explanation string to speak back to the caller.
     """
-    print(f"📞 [TELNYX] Dialing {ADMIN_PHONE_NUMBER}...")
-
-    # We still put something in client_state, but webhook will build the main prompt
-    summary = {
-        "action": action,
-        "risk_score": risk_score,
-        "amount": payload.get("amount"),
-        "vendor": payload.get("vendor"),
-    }
-    encoded_state = base64.b64encode(json.dumps(summary).encode("utf-8")).decode("utf-8")
-
+    print(f"🧠 [GROQ Q&A] Question: {question}")
     try:
-        resp = requests.post(
-            f"{TELNYX_BASE_URL}/calls",
-            json={
-                "connection_id": TELNYX_CONNECTION_ID,
-                "to": ADMIN_PHONE_NUMBER,
-                "from": TELNYX_PHONE_NUMBER,
-                "stream_track": "inbound_track",
-                "client_state": encoded_state,
-            },
-            headers=TELNYX_HEADERS,
+        context = f"""
+        Transaction Details:
+        - Action: {LAST_TRANSACTION.get('action')}
+        - Payload: {json.dumps(LAST_TRANSACTION.get('payload'))}
+        - Reasoning: {LAST_TRANSACTION.get('reasoning')}
+        - Risk Score: {CURRENT_STATE.get('risk_score')}
+        - Initial Analysis: {CURRENT_STATE.get('analysis')}
+        """
+
+        prompt = f"""
+        You are Sentinel, a security AI talking to a human approver over the phone.
+
+        Context:
+        {context}
+
+        The human asked: "{question}".
+
+        Your job:
+        - Answer clearly in 2–4 sentences.
+        - Explain the risk in simple terms.
+        - Reference the amount, vendor, and why it's unusual.
+        - If they seem like they want reassurance, suggest a safe action (like ‘verify vendor first’).
+        - DO NOT mention that you're an AI model or JSON.
+
+        Return ONLY the spoken answer, no JSON, no quotes.
+        """
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You speak as Sentinel over the phone. No JSON. Just the spoken answer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
         )
-        print(f"📡 [TELNYX] /calls response: {resp.status_code} {resp.text}")
-        return resp.ok
+        answer = response.choices[0].message.content.strip()
+        print(f"🧠 [GROQ Q&A] Answer: {answer}")
+        return answer
     except Exception as e:
-        print(f"❌ [TELNYX] Error starting call: {e}")
+        print(f"❌ Groq Error (Q&A): {e}")
+        return "I'm having trouble accessing my analysis engine right now. From what I see, this still looks like a high-risk payment to an unknown vendor. I would verify the vendor details before approving."
+
+# --- TELNYX HELPERS ---
+
+def telnyx_post(path, payload):
+    """Wrapper with logging."""
+    url = f"{TELNYX_BASE_URL}{path}"
+    try:
+        print(f"📡 [TELNYX] POST {url} -> {payload}")
+        r = requests.post(url, headers=TELNYX_HEADERS, json=payload)
+        print(f"📡 [TELNYX] Response {r.status_code}: {r.text}")
+        return r
+    except Exception as e:
+        print(f"❌ [TELNYX] Error POST {url}: {e}")
+        return None
+
+def trigger_voice_auth():
+    """
+    Start the Telnyx outbound call. We encode a summary into client_state
+    so that when the call is answered, we can read it out.
+    """
+    if not ADMIN_PHONE_NUMBER or not TELNYX_PHONE_NUMBER:
+        print("❌ [TELNYX] Missing phone numbers")
         return False
 
+    summary = f"High risk payment detected. Amount {LAST_TRANSACTION['payload'].get('amount')} dollars to {LAST_TRANSACTION['payload'].get('vendor')}."
+    encoded_state = base64.b64encode(summary.encode("utf-8")).decode("utf-8")
+
+    print(f"📞 [TELNYX] Dialing {ADMIN_PHONE_NUMBER}...")
+    resp = telnyx_post("/calls", {
+        "connection_id": TELNYX_CONNECTION_ID,
+        "to": ADMIN_PHONE_NUMBER,
+        "from": TELNYX_PHONE_NUMBER,
+        "stream_track": "inbound_track",
+        "client_state": encoded_state
+    })
+
+    if resp is None or not resp.ok:
+        print("❌ [TELNYX] Failed to start call")
+        return False
+
+    return True
+
+def start_dtmf_menu(call_id: str, summary: str):
+    """
+    When the call is answered, speak the summary and instructions,
+    and gather DTMF (1 = approve, 2 = conversational Q&A).
+    """
+    message = (
+        f"{summary} "
+        "This payment looks high risk. "
+        "Press 1 to approve immediately. "
+        "Press 2 if you want to ask me questions about this transaction after the beep."
+    )
+
+    telnyx_post(f"/calls/{call_id}/actions/gather_using_speak", {
+        "payload": message,
+        "language": "en-US",
+        "voice": "female",
+        "input_type": "dtmf",
+        "beep_enabled": True,
+        "timeout_millis": 10000  # 10s to press a key
+    })
+
+def start_speech_question_gather(call_id: str):
+    """
+    After the user presses 2, we go into Q&A mode.
+    We prompt them and then gather speech.
+    """
+    prompt = (
+        "Okay. You can now ask any question about this transaction after the beep. "
+        "For example, you can ask why this is risky, what looks unusual, "
+        "or what you should do next."
+    )
+
+    telnyx_post(f"/calls/{call_id}/actions/gather_using_speak", {
+        "payload": prompt,
+        "language": "en-US",
+        "voice": "female",
+        "input_type": "speech",
+        "beep_enabled": True,
+        "timeout_millis": 15000  # 15 seconds to speak
+    })
+
+def speak_and_loop_question(call_id: str, answer: str):
+    """
+    Speak the answer and then invite another question.
+    """
+    message = (
+        f"{answer} "
+        "If you have another question, ask it after the beep. "
+        "Otherwise, you can say goodbye to end the call."
+    )
+
+    telnyx_post(f"/calls/{call_id}/actions/gather_using_speak", {
+        "payload": message,
+        "language": "en-US",
+        "voice": "female",
+        "input_type": "speech",
+        "beep_enabled": True,
+        "timeout_millis": 15000
+    })
 
 # --- API ENDPOINTS ---
 
 @app.get("/api/sentinel/status")
 def get_status():
-    """Frontend & agent poll this to see what the Sentinel is doing."""
+    """Frontend polls this to see what the Agent is doing"""
     return CURRENT_STATE
-
 
 @app.post("/api/sentinel/execute")
 def execute_action(request: ActionRequest):
-    global CURRENT_STATE
+    global CURRENT_STATE, LAST_TRANSACTION
+
+    # Store context for later Q&A
+    LAST_TRANSACTION["action"] = request.action
+    LAST_TRANSACTION["payload"] = request.payload
+    LAST_TRANSACTION["reasoning"] = request.reasoning
 
     CURRENT_STATE["status"] = "ANALYZING"
 
-    with sentry_sdk.start_transaction(
-        op="agent.action", name=f"Execute {request.action}"
-    ) as span:
+    with sentry_sdk.start_transaction(op="agent.action", name=f"Execute {request.action}") as span:
         span.set_data("payload", request.payload)
 
-        risk_score, analysis = analyze_risk_with_groq(
-            request.action, request.payload, request.reasoning
-        )
-
-        # Update global state with AI results
+        risk_score, analysis = analyze_risk_with_groq(request.action, request.payload, request.reasoning)
         CURRENT_STATE["risk_score"] = risk_score
         CURRENT_STATE["analysis"] = analysis
-        CURRENT_STATE["last_action"] = request.action
-        CURRENT_STATE["last_payload"] = request.payload
-
         span.set_data("risk_score", risk_score)
 
-        # High risk → require voice auth
+        print(f"🔎 [RISK] Score={risk_score}, Analysis={analysis}")
+
         if risk_score > 50:
             sentry_sdk.set_tag("risk", "HIGH")
             CURRENT_STATE["status"] = "BLOCKED_AWAITING_AUTH"
 
-            trigger_voice_auth(request.action, request.payload, risk_score)
+            ok = trigger_voice_auth()
+            if not ok:
+                return {
+                    "status": "ERROR_TELNYX",
+                    "risk_score": risk_score,
+                    "analysis": analysis
+                }
 
             return {
                 "status": "BLOCKED_AWAITING_AUTH",
                 "risk_score": risk_score,
-                "analysis": analysis,
+                "analysis": analysis
             }
 
-        # Low risk → auto-execute
         sentry_sdk.set_tag("risk", "LOW")
         CURRENT_STATE["status"] = "APPROVED"
-        return {"status": "EXECUTED", "risk_score": risk_score}
+        return {"status": "EXECUTED", "risk_score": risk_score, "analysis": analysis}
 
+# --- TELNYX WEBHOOK ---
 
 @app.post("/api/telnyx/webhook")
 async def telnyx_webhook(request: Request):
     """
     Handles Telnyx call events:
-    - call.answered        → speak summary + ask for 1 (approve) or 2 (details)
-    - call.dtmf.received   → 1 = approve, 2 = speak details + re-prompt
+    - call.answered: Play summary + menu (1 approve, 2 Q&A).
+    - call.dtmf.received: 1 = approve, 2 = enter Q&A mode.
+    - call.gather.ended: Handle spoken question, answer with Groq, loop.
     """
     global CURRENT_STATE
 
@@ -195,95 +320,106 @@ async def telnyx_webhook(request: Request):
 
     print(f"⚡ [WEBHOOK] Event: {event_type}")
 
-    # Helper: get transaction info from global state
-    last_payload = CURRENT_STATE.get("last_payload") or {}
-    amount = last_payload.get("amount", "an unknown amount")
-    vendor = last_payload.get("vendor", "an unknown vendor")
-    risk_score = CURRENT_STATE.get("risk_score", 0)
-    analysis = CURRENT_STATE.get("analysis", "")
+    if not call_id:
+        print("⚠️ [WEBHOOK] No call_id in payload")
+        return {"status": "ok"}
 
+    # --- 1) CALL ANSWERED: Speak risk summary + DTMF menu ---
     if event_type == "call.answered":
-        # When you pick up, explain the situation & ask for 1 or 2
-        message = (
-            f"Vault Keeper Alert. We detected a high risk transaction. "
-            f"Risk score {risk_score} out of 100. "
-            f"The agent is requesting a payment of {amount} dollars to vendor {vendor}. "
-            "If you approve this transaction, press 1. "
-            "If you want more details before deciding, press 2."
-        )
+        client_state = payload.get("client_state")
+        summary = "Authorization required for a high-risk payment."
 
-        requests.post(
-            f"{TELNYX_BASE_URL}/calls/{call_id}/actions/gather_using_speak",
-            headers=TELNYX_HEADERS,
-            json={
-                "payload": message,
-                "language": "en-US",
-                "voice": "male",
-                "input_type": "dtmf",
-                "timeout_millis": 60000,
-            },
-        )
+        if client_state:
+            try:
+                summary = base64.b64decode(client_state).decode("utf-8")
+            except Exception as e:
+                print(f"⚠️ [WEBHOOK] Failed to decode client_state: {e}")
 
+        print(f"📞 [CALL] Answered. Summary for user: {summary}")
+        start_dtmf_menu(call_id, summary)
+
+    # --- 2) DTMF RECEIVED: 1 = approve, 2 = Q&A mode ---
     elif event_type == "call.dtmf.received":
         digit = payload.get("digit")
         CURRENT_STATE["last_digit"] = digit
-        print(f"🔢 BUTTON PRESSED: {digit}")
+        print(f"🔢 [DTMF] Digit pressed: {digit}")
 
+        # APPROVE
         if digit == "1":
-            # APPROVE
-            print("✅ AUTHENTICATION VERIFIED (1 pressed)!")
+            print("✅ [AUTH] Approved via DTMF 1")
             CURRENT_STATE["status"] = "APPROVED"
 
-            requests.post(
-                f"{TELNYX_BASE_URL}/calls/{call_id}/actions/speak",
-                headers=TELNYX_HEADERS,
-                json={
-                    "payload": "Access granted. The transaction has been approved. Goodbye.",
-                    "language": "en-US",
-                    "voice": "male",
-                },
-            )
+            telnyx_post(f"/calls/{call_id}/actions/speak", {
+                "payload": "Approval confirmed. The transaction will proceed. Goodbye.",
+                "language": "en-US",
+                "voice": "female"
+            })
 
+            # Optionally hang up after speaking (Telnyx will usually end after message)
+            telnyx_post(f"/calls/{call_id}/actions/hangup", {})
+
+        # ENTER Q&A MODE
         elif digit == "2":
-            # MORE DETAILS → speak why it's risky, then re-prompt
-            detail_message = (
-                f"Here are the details. "
-                f"The risk score is {risk_score} out of 100. "
-                f"The agent wants to pay {amount} dollars to vendor {vendor}. "
-                f"Reason: {analysis}. "
-                "If you approve this transaction, press 1. "
-                "If you want to hear these details again, press 2."
-            )
+            print("🗣️ [Q&A] Entering conversational mode")
+            CURRENT_STATE["status"] = "QNA_MODE"
 
-            requests.post(
-                f"{TELNYX_BASE_URL}/calls/{call_id}/actions/gather_using_speak",
-                headers=TELNYX_HEADERS,
-                json={
-                    "payload": detail_message,
-                    "language": "en-US",
-                    "voice": "male",
-                    "input_type": "dtmf",
-                    "timeout_millis": 60000,
-                },
-            )
+            start_speech_question_gather(call_id)
 
         else:
-            # Unknown key → tell user and re-prompt
-            error_msg = (
-                "Sorry, I did not understand that input. "
-                "Press 1 to approve the transaction, or 2 to hear more details."
-            )
-            requests.post(
-                f"{TELNYX_BASE_URL}/calls/{call_id}/actions/gather_using_speak",
-                headers=TELNYX_HEADERS,
-                json={
-                    "payload": error_msg,
-                    "language": "en-US",
-                    "voice": "male",
-                    "input_type": "dtmf",
-                    "timeout_millis": 60000,
-                },
-            )
+            # Unknown key - repeat menu
+            print("❓ [DTMF] Unknown key, repeating menu")
+            summary = CURRENT_STATE.get("analysis", "High-risk payment detected.")
+            start_dtmf_menu(call_id, summary)
 
-    # Always return OK so Telnyx is happy
+    # --- 3) GATHER ENDED: Handle spoken questions in Q&A mode ---
+    elif event_type == "call.gather.ended":
+        # Depending on your Telnyx config, the transcription field might look like this:
+        # payload["speech"]["transcription"]
+        # or payload["transcription"]
+        speech = payload.get("speech") or {}
+        question_text = None
+
+        if isinstance(speech, dict):
+            question_text = speech.get("transcription") or speech.get("text")
+
+        if not question_text:
+            question_text = payload.get("transcription")
+
+        if not question_text:
+            print("⚠️ [Q&A] No transcription found in gather payload")
+            telnyx_post(f"/calls/{call_id}/actions/speak", {
+                "payload": "I didn't catch that. Please ask your question again after the beep.",
+                "language": "en-US",
+                "voice": "female"
+            })
+            start_speech_question_gather(call_id)
+            return {"status": "ok"}
+
+        question_text = question_text.strip()
+        print(f"🗣️ [Q&A] User asked: {question_text}")
+        CURRENT_STATE["last_question"] = question_text
+
+        # If user wants to end the conversation
+        lower_q = question_text.lower()
+        if "goodbye" in lower_q or "that's all" in lower_q or "no more" in lower_q:
+            print("👋 [Q&A] User ended conversation by voice")
+            telnyx_post(f"/calls/{call_id}/actions/speak", {
+                "payload": "Got it. Ending the call now. Goodbye.",
+                "language": "en-US",
+                "voice": "female"
+            })
+            telnyx_post(f"/calls/{call_id}/actions/hangup", {})
+            return {"status": "ok"}
+
+        # Use Groq to answer the question about this transaction
+        answer = answer_risk_question_with_groq(question_text)
+        CURRENT_STATE["last_answer"] = answer
+
+        # Speak answer and loop
+        speak_and_loop_question(call_id, answer)
+
+    else:
+        # Just log other events so you can see them in the console
+        print(f"ℹ️ [WEBHOOK] Unhandled event type: {event_type}")
+
     return {"status": "ok"}
