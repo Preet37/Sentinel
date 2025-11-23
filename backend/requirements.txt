@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sentry-sdk
+telnyx
+pydantic
+python-dotenv
+requests

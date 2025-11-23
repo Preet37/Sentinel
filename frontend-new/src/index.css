@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 222 47% 5%;
+    --foreground: 120 100% 95%;
+
+    --card: 222 47% 8%;
+    --card-foreground: 120 100% 95%;
+
+    --popover: 222 47% 8%;
+    --popover-foreground: 120 100% 95%;
+
+    --primary: 120 100% 50%;
+    --primary-foreground: 222 47% 5%;
+
+    --secondary: 200 100% 50%;
+    --secondary-foreground: 222 47% 5%;
+
+    --muted: 222 20% 20%;
+    --muted-foreground: 120 30% 60%;
+
+    --accent: 45 100% 50%;
+    --accent-foreground: 222 47% 5%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 30% 15%;
+    --input: 222 30% 15%;
+    --ring: 120 100% 50%;
+
+    --radius: 0.25rem;
+
+    /* Cyber theme colors */
+    --cyber-bg: 222 47% 5%;
+    --cyber-surface: 222 47% 8%;
+    --cyber-border: 222 30% 15%;
+    
+    /* Status colors */
+    --status-idle: 200 100% 50%;
+    --status-monitoring: 120 100% 50%;
+    --status-analyzing: 45 100% 50%;
+    --status-blocked: 0 84% 60%;
+    --status-approved: 120 100% 50%;
+    
+    /* Glow effects */
+    --glow-green: 120 100% 50%;
+    --glow-red: 0 84% 60%;
+    --glow-amber: 45 100% 50%;
+    --glow-blue: 200 100% 50%;
+    
+    /* Terminal colors */
+    --terminal-bg: 0 0% 0%;
+    --terminal-text: 120 100% 70%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+  }
+
+  /* Custom animations */
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+  }
+
+  @keyframes spin-slow {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes flicker {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.8;
+    }
+  }
+
+  .animate-pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  .animate-spin-slow {
+    animation: spin-slow 3s linear infinite;
+  }
+
+  .animate-flicker {
+    animation: flicker 0.5s ease-in-out infinite;
+  }
+}
