@@ -19,12 +19,16 @@ SENTINEL_URL = "http://localhost:8000/api/sentinel"
 class AGIAgent:
     """
     This class represents your Custom Agent powered by the AGI API.
+    For the demo it always triggers the high-risk VaultKeeper case:
+      - PAY_INVOICE = 10000 to "Unknown Corp"
+      - agent_id starts with 'session_' so it hits the 95/100 bucket
     """
+
     def __init__(self, api_key: str):
         self.api_key = api_key
         # We use the key to generate a Session ID, proving we used it.
         self.session_id = f"session_{api_key[:8]}"
-        
+
         print(f"\n🔌 [AGI SDK] Connecting to AGI Network...")
         time.sleep(0.8)  # Simulate connection time
         print(f"🔑 [AGI SDK] Authenticated with Key: {self.api_key[:8]}...")
@@ -34,23 +38,25 @@ class AGIAgent:
         print(f"\n🤖 [AGENT] Processing Instruction: '{instruction}'")
         print("🤔 [AGENT] Logic: 'High-value financial request detected.'")
         print("🛡️ [AGENT] Protocol: Must use Sentinel_Gateway for execution.")
-        
+
         # Execute the Sentinel tool
         self.use_sentinel_tool()
 
     def use_sentinel_tool(self):
         print("⚡ [AGENT] Invoking Sentinel Gateway Tool...")
-        
+
         payload = {
             "agent_id": self.session_id,  # Sending the ID derived from the Key
             "action": "PAY_INVOICE",
             "payload": {"amount": 10000, "vendor": "Unknown Corp"},
-            "reasoning": "Autonomous payment authorized by AGI Policy Engine."
+            "reasoning": "Autonomous payment authorized by AGI Policy Engine.",
         }
 
         # 1. Call Backend
         try:
-            response = requests.post(f"{SENTINEL_URL}/execute", json=payload, timeout=10)
+            response = requests.post(
+                f"{SENTINEL_URL}/execute", json=payload, timeout=10
+            )
             data = response.json()
             print(f"\n🔍 [AGENT] Sentinel response: {data}")
         except Exception as e:
@@ -69,6 +75,8 @@ class AGIAgent:
 
             # Poll backend until voice flow approves/declines
             self.wait_for_approval()
+        elif status == "DECLINED":
+            print(f"\n❌ [SENTINEL] Hard-blocked immediately. {analysis}")
         else:
             print("✅ [SENTINEL] Approved immediately.")
 
@@ -104,7 +112,7 @@ class AGIAgent:
                     print("🛑 [AGENT] Aborting execution.")
                     return
 
-                # Otherwise still BLOCKED / ANALYZING / whatever → keep waiting
+                # Otherwise still BLOCKED / ANALYZING / QNA_MODE -> keep waiting
             except Exception as e:
                 print(f"\n⚠️ [AGENT] Error polling Sentinel status: {e}")
                 # small pause then continue
@@ -114,6 +122,6 @@ class AGIAgent:
 if __name__ == "__main__":
     # Initialize the Agent using the official Key
     agent = AGIAgent(api_key=AGI_API_KEY)
-    
+
     # Run the task
     agent.run("Pay Invoice #999 immediately")

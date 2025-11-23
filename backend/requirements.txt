@@ -5,3 +5,4 @@ telnyx
 pydantic
 python-dotenv
 requests
+groq

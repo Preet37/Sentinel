@@ -1,18 +1,16 @@
-import { LucideIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { ComponentType } from "react";
 
 interface ModuleCardProps {
   title: string;
   subtitle: string;
-  icon: LucideIcon;
-  status: "IDLE" | "PROTECTED" | "ACTIVE";
+  icon: ComponentType<{ className?: string }>;
+  status: "IDLE" | "ACTIVE";
   actionLabel: string;
   onAction: () => void;
   disabled?: boolean;
 }
 
-export const ModuleCard = ({
+export const ModuleCard: React.FC<ModuleCardProps> = ({
   title,
   subtitle,
   icon: Icon,
@@ -20,40 +18,42 @@ export const ModuleCard = ({
   actionLabel,
   onAction,
   disabled,
-}: ModuleCardProps) => {
-  const statusColors = {
-    IDLE: "text-muted-foreground",
-    PROTECTED: "text-status-monitoring",
-    ACTIVE: "text-status-analyzing",
-  };
+}) => {
+  const isIdle = status === "IDLE";
 
   return (
-    <Card className="bg-cyber-surface border-cyber-border p-4 hover:border-primary/50 transition-all">
-      <div className="flex items-start gap-3 mb-4">
-        <div className="p-2 rounded bg-primary/10 border border-primary/20">
-          <Icon className="w-6 h-6 text-primary" />
+    <div className="rounded-xl border border-cyber-border bg-card p-4 space-y-3 shadow-sm">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Icon className="w-4 h-4 text-primary" />
+          <div>
+            <h2 className="text-xs font-semibold tracking-wide">{title}</h2>
+            <p className="text-[11px] text-muted-foreground">{subtitle}</p>
+          </div>
         </div>
-        <div className="flex-1">
-          <h3 className="font-bold text-sm tracking-wider">{title}</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">{subtitle}</p>
-        </div>
-      </div>
-      
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-[10px] font-bold tracking-widest text-muted-foreground">STATUS</span>
-        <span className={`text-[10px] font-bold tracking-widest ${statusColors[status]}`}>
-          {status}
+        <span
+          className={`text-[10px] px-2 py-0.5 rounded-full border ${
+            isIdle
+              ? "border-muted text-muted-foreground"
+              : "border-amber-500 text-amber-400"
+          }`}
+        >
+          {isIdle ? "IDLE" : "WATCHING"}
         </span>
       </div>
 
-      <Button
+      <button
         onClick={onAction}
         disabled={disabled}
-        variant="outline"
-        className="w-full bg-destructive/10 border-destructive/30 hover:bg-destructive/20 hover:border-destructive text-destructive text-xs font-bold tracking-wide"
+        className={`w-full text-[11px] mt-1 py-1.5 rounded-lg border font-semibold tracking-wide transition 
+          ${
+            disabled
+              ? "border-muted text-muted-foreground bg-muted/20 cursor-not-allowed"
+              : "border-primary text-primary hover:bg-primary/10"
+          }`}
       >
         {actionLabel}
-      </Button>
-    </Card>
+      </button>
+    </div>
   );
 };
